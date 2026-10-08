@@ -1,0 +1,10 @@
+// The producer's test project for Osysharp.Dns.Cloudflare. Every Cloudflare call is STUBBED against a fake that keeps
+// its records in a table — so a test asserts what Cloudflare would HOLD after the provider ran, and which calls it made,
+// never merely that a call returned. No test reaches api.cloudflare.com.
+app DnsCloudflareKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Dns@0;
+  use Osysharp.Dns.Cloudflare@0 { egress "api.cloudflare.com"; }
+  use Osysharp.Http;
+}

@@ -1,0 +1,25 @@
+// Osysharp.Dns.Cloudflare — Cloudflare DNS as an `Osysharp.Dns` provider, written in Osy#.
+//
+// It needs nothing privileged: a class implementing the contract's `IDnsProvider` over `Http.*` against Cloudflare's
+// v4 API, so anyone could have written it exactly as it is — and the next provider (Google Cloud DNS, Azure DNS, a
+// self-hosted server) is the same shape over another API.
+//
+// ⚠ IT ASKS FOR NO SECRET, the call `Osysharp.Resend` and `Osysharp.Payments.Stripe` make: the API token is a setting on
+//   the provider, so the app names its own secret (`new CloudflareDns { ApiToken = Secret.Mine }`) and this package never
+//   learns which.
+//
+// ⛔ RECORDS ARE WRITTEN "DNS ONLY", NEVER PROXIED — with ONE exception, a CNAME to a Cloudflare Tunnel, which Cloudflare routes only
+//   through its edge (ledger D-INGRESSBRIDGE1; `CloudflareDns.Proxied`). A proxied record terminates TLS at Cloudflare and forwards from
+//   there — a global front door in front of every zone, which is the option D-ZONEDNS1 decided against (every request
+//   would cross clouds through it). A name this provider points at a zone's gateway resolves to that gateway.
+package Osysharp.Dns.Cloudflare {
+  version     "0.2.0";
+  minPlatform "0.9.0";
+  summary     "Cloudflare DNS as an Osysharp.Dns provider — records by the v4 API, TXT values added and removed one at a time, never proxied.";
+  model "model/*.osy";
+  use Osysharp.Dns@0;
+  use Osysharp.Http;
+  // The only host this package may reach.
+  egress "api.cloudflare.com";
+  tests "tests";
+}

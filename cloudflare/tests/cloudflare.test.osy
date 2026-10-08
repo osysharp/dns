@@ -1,0 +1,155 @@
+// Osysharp.Dns.Cloudflare — what Cloudflare HOLDS after the provider ran, and the calls it took to get there. The fake
+// Cloudflare keeps its records in a table, so "it replaced the alias" and "it left the other zone's challenge alone" are
+// read off the records, not off a return value.
+
+using Osysharp.Dns;
+using Osysharp.Dns.Cloudflare;
+using DnsCloudflareKitTests;
+using Osysharp.Http;
+
+[TestFixture]
+void Testers() {
+  new Tester { Email = "t@cf.test" };
+  // The fake Cloudflare: every call the provider makes lands in `FakeCfCall` and is answered from `FakeCfRecord`.
+  Http.Get.Stub((url, body, headers) => FakeGet(url, headers));
+  Http.Post.Stub((url, body, headers) => FakePost(url, body, headers));
+  Http.Put.Stub((url, body, headers) => FakePut(url, body, headers));
+  Http.Delete.Stub((url, body, headers) => FakeDelete(url, headers));
+}
+
+principal T => Tester.Single(t => t.Email == "t@cf.test");
+
+[Test(Testers)]
+void a_record_lands_in_the_longest_zone_that_ends_its_name_unproxied_with_the_token() {
+  runas (T) {
+    Cloudflare().SetRecord("billing--prod.eu.osyrin.test", DnsRecordKind.CNAME, "gw.zone-b.example.net.", 60);
+    Cloudflare().SetRecord("shop--prod.osyrin.test", DnsRecordKind.A, "203.0.113.7", 30);
+    var eu = FakeCfRecord.Single(r => r.Name == "billing--prod.eu.osyrin.test");
+    Assert.Equal("zone-eu", eu.ZoneId);
+    Assert.Equal("CNAME", eu.Type);
+    Assert.Equal("gw.zone-b.example.net", eu.Content);
+    Assert.False(eu.Proxied);
+    var root = FakeCfRecord.Single(r => r.Name == "shop--prod.osyrin.test");
+    Assert.Equal("zone-root", root.ZoneId);
+    // Cloudflare's floor is 60 seconds; a shorter TTL is raised to it, not refused.
+    Assert.Equal(60, root.Ttl);
+    // Every call carried the token — and nothing else could have authenticated it.
+    foreach (var call in FakeCfCall.ToList()) { Assert.Equal("Bearer cf-test-token", call.Authorization); }
+  }
+}
+
+[Test(Testers)]
+void an_address_that_keeps_its_kind_is_updated_in_place_and_one_that_changes_kind_replaces_the_other() {
+  runas (T) {
+    Standing("zone-root", "CNAME", "app--prod.osyrin.test", "gw.zone-a.example.net");
+    Cloudflare().SetRecord("app--prod.osyrin.test", DnsRecordKind.CNAME, "gw.zone-b.example.net", 60);
+    var moved = FakeCfRecord.Where(r => r.Name == "app--prod.osyrin.test").ToList();
+    Assert.Equal(1, moved.Count);
+    Assert.Equal("gw.zone-b.example.net", moved[0].Content);
+    // Kept its kind: one PUT, no delete — the name never resolved to nothing.
+    Assert.Equal(1, FakeCfCall.Where(c => c.Method == "PUT").ToList().Count);
+    Assert.Equal(0, FakeCfCall.Where(c => c.Method == "DELETE").ToList().Count);
+
+    // Changing kind: the alias goes and the address arrives — a CNAME cannot share its name.
+    Cloudflare().SetRecord("app--prod.osyrin.test", DnsRecordKind.A, "203.0.113.9", 60);
+    var after = FakeCfRecord.Where(r => r.Name == "app--prod.osyrin.test").ToList();
+    Assert.Equal(1, after.Count);
+    Assert.Equal("A", after[0].Type);
+    Assert.Equal("203.0.113.9", after[0].Content);
+  }
+}
+
+[Test(Testers)]
+void writing_what_is_already_there_makes_no_write_at_all() {
+  runas (T) {
+    Standing("zone-root", "CNAME", "same--prod.osyrin.test", "gw.zone-a.example.net");
+    var row = FakeCfRecord.Single(r => r.Name == "same--prod.osyrin.test");
+    row.Ttl = 60;
+    Cloudflare().SetRecord("same--prod.osyrin.test", DnsRecordKind.CNAME, "gw.zone-a.example.net", 60);
+    Assert.Equal(0, FakeCfCall.Where(c => c.Method != "GET").ToList().Count);
+  }
+}
+
+[Test(Testers)]
+void a_txt_value_is_one_more_record_and_removing_one_leaves_the_other_zones_challenge_standing() {
+  runas (T) {
+    // Zone A's challenge is already published when zone B's arrives — the case the contract's ADD exists for.
+    Standing("zone-root", "TXT", "_acme-challenge.osyrin.test", "\"zone-a-proof\"");
+    Cloudflare().AddTxtValue("_acme-challenge.osyrin.test", "zone-b-proof", 60);
+    Cloudflare().AddTxtValue("_acme-challenge.osyrin.test", "zone-b-proof", 60);
+    var values = TxtValuesAt(Cloudflare().ListRecords("osyrin.test"), "_acme-challenge.osyrin.test");
+    Assert.Equal(2, values.Count);
+    Assert.Contains("zone-a-proof", values);
+    Assert.Contains("zone-b-proof", values);
+    // ⛔ No PUT ever touched a TXT: adding is creating, never rewriting what stands.
+    Assert.Equal(0, FakeCfCall.Where(c => c.Method == "PUT").ToList().Count);
+    Assert.Equal(1, FakeCfCall.Where(c => c.Method == "POST").ToList().Count);
+
+    Cloudflare().RemoveTxtValue("_acme-challenge.osyrin.test", "zone-b-proof");
+    var left = FakeCfRecord.Where(r => r.Name == "_acme-challenge.osyrin.test").ToList();
+    Assert.Equal(1, left.Count);
+    Assert.Equal("\"zone-a-proof\"", left[0].Content);
+  }
+}
+
+// A name served through a Cloudflare Tunnel is routed only by Cloudflare's edge, so its CNAME — and only that one — is proxied.
+[Test(Testers)]
+void a_cname_to_a_tunnel_is_proxied_and_every_other_record_stays_dns_only() {
+  runas (T) {
+    Cloudflare().SetRecord("vault--prod.osyrin.test", DnsRecordKind.CNAME, "6ff42ae2-765d-4adf-8112-31c55c1551ef.cfargotunnel.com", 60);
+    Cloudflare().SetRecord("shop--prod.osyrin.test", DnsRecordKind.CNAME, "gw.zone-b.example.net", 60);
+    Assert.True(FakeCfRecord.Single(r => r.Name == "vault--prod.osyrin.test").Proxied);
+    Assert.False(FakeCfRecord.Single(r => r.Name == "shop--prod.osyrin.test").Proxied);
+    // Writing the tunnel record again changes nothing: proxied is what it should be.
+    var writes = FakeCfCall.Where(c => c.Method != "GET").ToList().Count;
+    Cloudflare().SetRecord("vault--prod.osyrin.test", DnsRecordKind.CNAME, "6ff42ae2-765d-4adf-8112-31c55c1551ef.cfargotunnel.com", 60);
+    Assert.Equal(writes, FakeCfCall.Where(c => c.Method != "GET").ToList().Count);
+  }
+}
+
+[Test(Testers)]
+void deleting_a_names_records_takes_its_address_and_leaves_its_text() {
+  runas (T) {
+    Standing("zone-root", "CNAME", "gone--prod.osyrin.test", "gw.zone-a.example.net");
+    Standing("zone-root", "TXT", "gone--prod.osyrin.test", "keep");
+    Cloudflare().DeleteRecords("gone--prod.osyrin.test");
+    var left = FakeCfRecord.Where(r => r.Name == "gone--prod.osyrin.test").ToList();
+    Assert.Equal(1, left.Count);
+    Assert.Equal("TXT", left[0].Type);
+  }
+}
+
+[Test(Testers)]
+void a_listing_holds_the_four_kinds_under_the_domain_and_leaves_out_the_rest() {
+  runas (T) {
+    Standing("zone-root", "CNAME", "a--b.osyrin.test", "gw.example.net");
+    Standing("zone-root", "MX", "osyrin.test", "mail.example.net");
+    Standing("zone-root", "TXT", "osyrin.test", "\"v=spf1 -all\"");
+    var records = Cloudflare().ListRecords("osyrin.test");
+    Assert.Equal(2, records.Count);
+    var cname = AddressRecordsAt(records, "a--b.osyrin.test");
+    Assert.Equal(1, cname.Count);
+    Assert.Equal("gw.example.net", cname[0].Value);
+    // The quotes Cloudflare wraps a TXT in are not part of the value.
+    Assert.Equal("v=spf1 -all", TxtValuesAt(records, "osyrin.test")[0]);
+  }
+}
+
+[Test(Testers)]
+void a_name_no_zone_ends_is_refused_naming_the_zones_the_token_can_see() {
+  runas (T) {
+    var e = Assert.Throws(() => Cloudflare().SetRecord("app--prod.elsewhere.test", DnsRecordKind.CNAME, "gw.example.net", 60));
+    Assert.Contains("osyrin.test", e.Message);
+    Assert.Contains("eu.osyrin.test", e.Message);
+    Assert.Contains("Zone · DNS · Edit", e.Message);
+  }
+}
+
+[Test]
+void without_a_token_it_is_not_ready_and_says_which_credential_and_what_it_needs() {
+  var none = new CloudflareDns();
+  Assert.False(none.IsReady());
+  Assert.Contains("ApiToken", none.NotReadyReason());
+  Assert.Contains("Zone · DNS · Edit", none.NotReadyReason());
+  Assert.Throws(() => none.SetRecord("a--b.osyrin.test", DnsRecordKind.CNAME, "gw.example.net", 60));
+}

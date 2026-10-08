@@ -1,0 +1,243 @@
+namespace Osysharp.Dns.Cloudflare;
+
+using Osysharp.Dns;
+using Osysharp.Http;
+
+/// Cloudflare, as the app's DNS provider:
+///
+///   app.Dns = new DnsSetup {
+///     Provider = new CloudflareDns { ApiToken = Security.IsSecretSet("CloudflareDnsToken") ? Secret.CloudflareDnsToken : "" },
+///   };
+///
+/// The token needs **Zone · DNS · Edit** and **Zone · Zone · Read** on the zones it writes — create it under My Profile →
+/// API Tokens, scoped to those zones and no others. With no token it is not READY, and whatever writes records holds them
+/// rather than failing.
+///
+/// ⚑ IT FINDS THE ZONE ITSELF. Every name the contract hands over is fully qualified; the provider lists the zones the
+///   token can see and writes into the one whose name is the LONGEST that ends the record's name — so `a.eu.example.com`
+///   lands in an `eu.example.com` zone when the token can see one, and in `example.com` otherwise.
+public class CloudflareDns : IDnsProvider {
+  public string Key { get; } = "cloudflare";
+  /// The API token — `Secret.CloudflareDnsToken`, or empty while there is none.
+  public string ApiToken = "";
+  /// Cloudflare's API root, unless you are pointed at something that speaks the same wire.
+  public string BaseUrl = "https://api.cloudflare.com/client/v4";
+
+  public bool IsReady() { return ApiToken != ""; }
+
+  /// Says WHICH credential is missing and what it must be allowed to do — the contract's default names only the provider.
+  public string NotReadyReason() {
+    return "Cloudflare has no API token — set `ApiToken` on CloudflareDns in app.Dns. The token needs Zone · DNS · Edit and Zone · Zone · Read on the zones it writes.";
+  }
+
+  public List<DnsRecord> ListRecords(string domain) {
+    var d = NormalisedDnsName(domain);
+    var zone = ZoneOf(d);
+    List<DnsRecord> found = [];
+    var page = 1;
+    while (true) {
+      var list = JsonSerializer.Deserialize<CloudflareRecordList>(Get(
+        "/zones/" + zone.ZoneId + "/dns_records?per_page=100&page=" + Convert.ToString(page)));
+      foreach (var r in list.Result) {
+        var kind = KindOf(r.Type);
+        if (kind == null) { continue; }
+        if (!IsAtOrUnder(r.Name, d)) { continue; }
+        found.Add(Record(r));
+      }
+      if (list.ResultInfo == null || list.ResultInfo.Page >= list.ResultInfo.TotalPages) { break; }
+      page = page + 1;
+    }
+    return found;
+  }
+
+  public void SetRecord(string name, DnsRecordKind kind, string value, int ttl) {
+    if (!IsAddressKind(kind)) {
+      throw new ValidationException($"SetRecord writes an address — A, AAAA or CNAME — and {name} was asked for a TXT. A TXT value is added with AddTxtValue, which never replaces another.");
+    }
+    var n = NormalisedDnsName(name);
+    var v = kind == DnsRecordKind.CNAME ? NormalisedDnsName(value) : value.Trim();
+    var zone = ZoneOf(n);
+    var keep = "";
+    // ⚠ WHAT DIFFERS GOES FIRST. A CNAME cannot share its name with an A, and Cloudflare refuses the create while the
+    //   other still stands — so an address that changes KIND is a delete and then a create, and one that keeps its kind
+    //   is updated in place, which is one write with no moment at which the name resolves to nothing.
+    foreach (var r in RecordsNamed(zone, n)) {
+      var k = KindOf(r.Type);
+      if (k == null || !IsAddressKind(k.Value)) { continue; }
+      if (keep == "" && k.Value == kind) {
+        keep = r.RecordId;
+        if (Unquoted(r.Content).ToLower().TrimEnd('.') != v.ToLower() || r.Ttl != ttl || r.Proxied != Proxied(kind, v)) {
+          Write("PUT", "/zones/" + zone.ZoneId + "/dns_records/" + r.RecordId, Body(kind, n, v, ttl));
+        }
+      } else {
+        Write("DELETE", "/zones/" + zone.ZoneId + "/dns_records/" + r.RecordId, "");
+      }
+    }
+    if (keep == "") {
+      Write("POST", "/zones/" + zone.ZoneId + "/dns_records", Body(kind, n, v, ttl));
+    }
+  }
+
+  public void DeleteRecords(string name) {
+    var n = NormalisedDnsName(name);
+    var zone = ZoneOf(n);
+    foreach (var r in RecordsNamed(zone, n)) {
+      var k = KindOf(r.Type);
+      if (k == null || !IsAddressKind(k.Value)) { continue; }
+      Write("DELETE", "/zones/" + zone.ZoneId + "/dns_records/" + r.RecordId, "");
+    }
+  }
+
+  /// ⛔ A POST OF ONE MORE TXT RECORD — never a PUT over the name's TXT. Cloudflare holds each TXT value as a record of
+  ///   its own, so adding one is creating one, and the values already there are not read, let alone rewritten.
+  public void AddTxtValue(string name, string value, int ttl) {
+    var n = NormalisedDnsName(name);
+    var zone = ZoneOf(n);
+    foreach (var r in RecordsNamed(zone, n)) {
+      if (r.Type == "TXT" && Unquoted(r.Content) == value) { return; }
+    }
+    Write("POST", "/zones/" + zone.ZoneId + "/dns_records", Body(DnsRecordKind.TXT, n, value, ttl));
+  }
+
+  /// Deletes exactly the record holding `value` — every other TXT at the name stays, whoever published it.
+  public void RemoveTxtValue(string name, string value) {
+    var n = NormalisedDnsName(name);
+    var zone = ZoneOf(n);
+    foreach (var r in RecordsNamed(zone, n)) {
+      if (r.Type == "TXT" && Unquoted(r.Content) == value) {
+        Write("DELETE", "/zones/" + zone.ZoneId + "/dns_records/" + r.RecordId, "");
+      }
+    }
+  }
+
+  // ── the zone a name belongs to ──────────────────────────────────────────────────────────────────────────────────
+
+  /// The zone the token can see whose name is the longest that ends `name`. Refused, naming the zones it CAN see, when
+  /// none does — the commonest setup mistake is a token scoped to another zone, and "not found" alone points nowhere.
+  CloudflareZone ZoneOf(string name) {
+    CloudflareZone? best = null;
+    List<string> seen = [];
+    var page = 1;
+    while (true) {
+      var list = JsonSerializer.Deserialize<CloudflareZoneList>(Get("/zones?per_page=50&page=" + Convert.ToString(page)));
+      foreach (var z in list.Result) {
+        seen.Add(z.Name);
+        if (IsAtOrUnder(name, z.Name) && (best == null || z.Name.Length > best.Name.Length)) { best = z; }
+      }
+      if (list.ResultInfo == null || list.ResultInfo.Page >= list.ResultInfo.TotalPages) { break; }
+      page = page + 1;
+    }
+    if (best == null) {
+      var which = seen.Count == 0 ? "no zones at all" : "only " + string.Join(", ", seen);
+      throw new ExternalServiceException($"Cloudflare hosts no zone that {name} belongs to — this token can see {which}. Give the token Zone · Zone · Read and Zone · DNS · Edit on the zone that holds {name}.");
+    }
+    return best;
+  }
+
+  /// Every record at exactly `name` in `zone`.
+  List<CloudflareRecord> RecordsNamed(CloudflareZone zone, string name) {
+    var list = JsonSerializer.Deserialize<CloudflareRecordList>(Get(
+      "/zones/" + zone.ZoneId + "/dns_records?per_page=100&name=" + Uri.EscapeDataString(name)));
+    List<CloudflareRecord> exact = [];
+    foreach (var r in list.Result) {
+      if (NormalisedDnsName(r.Name) == name) { exact.Add(r); }
+    }
+    return exact;
+  }
+
+  // ── the wire ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  /// One record as the contract spells it.
+  DnsRecord Record(CloudflareRecord r) {
+    var kind = KindOf(r.Type) ?? DnsRecordKind.TXT;
+    var value = r.Type == "TXT" ? Unquoted(r.Content) : r.Content.Trim().TrimEnd('.');
+    return new DnsRecord { Name = NormalisedDnsName(r.Name), Kind = kind, Value = value, Ttl = (int)r.Ttl, ProviderId = r.RecordId };
+  }
+
+  /// The contract's kind for one of Cloudflare's record types, or null for a type the contract does not carry (MX, SRV,
+  /// CAA…) — which a listing leaves out rather than mislabels.
+  DnsRecordKind? KindOf(string type) {
+    if (type == "A") { return DnsRecordKind.A; }
+    if (type == "AAAA") { return DnsRecordKind.AAAA; }
+    if (type == "CNAME") { return DnsRecordKind.CNAME; }
+    if (type == "TXT") { return DnsRecordKind.TXT; }
+    return null;
+  }
+
+  /// Cloudflare's spelling of a kind.
+  string TypeOf(DnsRecordKind kind) {
+    if (kind == DnsRecordKind.A) { return "A"; }
+    if (kind == DnsRecordKind.AAAA) { return "AAAA"; }
+    if (kind == DnsRecordKind.CNAME) { return "CNAME"; }
+    return "TXT";
+  }
+
+  /// A TXT value without the quotes Cloudflare may wrap it in — what was published, which is what a caller compares.
+  string Unquoted(string content) {
+    var c = content.Trim();
+    if (c.Length >= 2 && c.StartsWith("\"") && c.EndsWith("\"")) { return c.Substring(1, c.Length - 2); }
+    return c;
+  }
+
+  string Body(DnsRecordKind kind, string name, string value, int ttl) {
+    // Cloudflare's floor is 60 seconds (1 means "automatic", which is 300): a shorter TTL is raised to it rather than
+    // refused, because what a caller wants from a short TTL is "change fast", and 60 is as fast as this host goes.
+    var t = ttl < 60 ? 60 : ttl;
+    return JsonSerializer.Serialize(new CloudflareRecordWrite { Type = TypeOf(kind), Name = name, Content = value, Ttl = t, Proxied = Proxied(kind, value) });
+  }
+
+  /// ⛔ THE ONE PROXIED RECORD: a CNAME to a Cloudflare Tunnel (`<id>.cfargotunnel.com`). Cloudflare routes a name to a tunnel only
+  ///    through its edge, so a DNS-only CNAME there resolves to nothing anybody can reach (ledger D-INGRESSBRIDGE1). Every other
+  ///    record stays DNS only, which is the package's rule.
+  bool Proxied(DnsRecordKind kind, string value) {
+    return kind == DnsRecordKind.CNAME && NormalisedDnsName(value).EndsWith(".cfargotunnel.com");
+  }
+
+  Dictionary<string, string> Headers() {
+    var headers = new Dictionary<string, string>();
+    headers.Add("Authorization", "Bearer " + ApiToken);
+    return headers;
+  }
+
+  string Get(string path) {
+    RequireToken();
+    var r = Http.Get(BaseUrl + path, Headers());
+    if (!r.IsSuccess) { throw new ExternalServiceException(Failure("GET", path, r)); }
+    return r.Body;
+  }
+
+  void Write(string method, string path, string body) {
+    RequireToken();
+    HttpResponse r;
+    if (method == "POST") { r = Http.Post(BaseUrl + path, body, "application/json", Headers()); }
+    else if (method == "PUT") { r = Http.Put(BaseUrl + path, body, "application/json", Headers()); }
+    else { r = Http.Delete(BaseUrl + path, Headers()); }
+    if (r.IsSuccess) { return; }
+    // An identical record already standing is what the caller asked for — two writers adding the same value raced.
+    if (method == "POST" && r.Body.Contains("81058")) { return; }
+    throw new ExternalServiceException(Failure(method, path, r));
+  }
+
+  void RequireToken() {
+    if (ApiToken == "") { throw new ExternalServiceException(NotReadyReason()); }
+  }
+
+  /// What went wrong, with every error Cloudflare gave rather than the first — and, for a refusal of the token, what the
+  /// token must be allowed to do, because Cloudflare's own words name an authentication code rather than a permission.
+  string Failure(string method, string path, HttpResponse r) {
+    var detail = r.Body;
+    if (r.Body.TrimStart().StartsWith("{")) {
+      var answer = JsonSerializer.Deserialize<CloudflareWriteAnswer>(r.Body);
+      if (answer.Errors.Count > 0) {
+        List<string> lines = [];
+        foreach (var e in answer.Errors) { lines.Add($"{e.Code}: {e.Message}"); }
+        detail = string.Join("; ", lines);
+      }
+    }
+    var line = $"Cloudflare refused {method} {path} with {r.StatusCode} — {detail}";
+    if (r.StatusCode == 401 || r.StatusCode == 403) {
+      line = line + ". The token needs Zone · DNS · Edit and Zone · Zone · Read on this zone.";
+    }
+    return line;
+  }
+}

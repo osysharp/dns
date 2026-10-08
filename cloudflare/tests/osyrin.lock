@@ -1,0 +1,36 @@
+{
+  "platform": {
+    "version": "0.9.0"
+  },
+  "entries": [
+    {
+      "name": "Osysharp.Dns",
+      "kind": "package",
+      "version": "0.1.0",
+      "hash": "sha256:806a36f455ee6742094c3233e7103dacce58171ea950ea4e430b8166fe909c37",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/dns",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Dns.Cloudflare",
+      "kind": "package",
+      "version": "0.2.0",
+      "hash": "sha256:41ae3a7619b1da4407a4988f0c620a82b66a0afe67f1373a18387c20fae43e78",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/dns-cloudflare",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Http",
+      "kind": "package",
+      "version": "1.0.0",
+      "hash": "sha256:4c24068aeea5ef1a155459d4cc332c85d7ee3d96049f2404e54ac860d94beb0f",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Http"
+    }
+  ]
+}

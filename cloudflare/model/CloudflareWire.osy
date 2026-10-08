@@ -1,0 +1,62 @@
+// Cloudflare's v4 API on the wire. JSON both ways, snake_case, every answer wrapped in the same envelope
+// (`success`, `errors`, `result`, `result_info`), so each shape says its own external names.
+namespace Osysharp.Dns.Cloudflare;
+
+/// One error in an envelope — Cloudflare's code and its own words.
+public class CloudflareError {
+  [ExternalName("code")] public long Code = 0;
+  [ExternalName("message")] public string Message = "";
+}
+
+/// Which page of a listing this was, and how many there are.
+public class CloudflarePage {
+  [ExternalName("page")] public long Page = 1;
+  [ExternalName("total_pages")] public long TotalPages = 1;
+}
+
+/// A zone — a domain Cloudflare hosts, such as `example.com`.
+public class CloudflareZone {
+  [ExternalName("id")] public string ZoneId = "";
+  [ExternalName("name")] public string Name = "";
+}
+
+/// What `GET /zones` answers.
+public class CloudflareZoneList {
+  [ExternalName("success")] public bool Success = false;
+  [ExternalName("errors")] public List<CloudflareError> Errors = [];
+  [ExternalName("result")] public List<CloudflareZone> Result = [];
+  [ExternalName("result_info")] public CloudflarePage? ResultInfo;
+}
+
+/// One DNS record as Cloudflare holds it.
+public class CloudflareRecord {
+  [ExternalName("id")] public string RecordId = "";
+  [ExternalName("type")] public string Type = "";
+  [ExternalName("name")] public string Name = "";
+  [ExternalName("content")] public string Content = "";
+  [ExternalName("ttl")] public long Ttl = 1;
+  [ExternalName("proxied")] public bool Proxied = false;
+}
+
+/// What `GET /zones/{id}/dns_records` answers.
+public class CloudflareRecordList {
+  [ExternalName("success")] public bool Success = false;
+  [ExternalName("errors")] public List<CloudflareError> Errors = [];
+  [ExternalName("result")] public List<CloudflareRecord> Result = [];
+  [ExternalName("result_info")] public CloudflarePage? ResultInfo;
+}
+
+/// What a write (`POST`, `PUT`, `DELETE`) answers — the envelope; the record itself is not read back.
+public class CloudflareWriteAnswer {
+  [ExternalName("success")] public bool Success = false;
+  [ExternalName("errors")] public List<CloudflareError> Errors = [];
+}
+
+/// What a write sends — one record. `proxied` is always false: see the package's note.
+public class CloudflareRecordWrite {
+  [ExternalName("type")] public string Type = "";
+  [ExternalName("name")] public string Name = "";
+  [ExternalName("content")] public string Content = "";
+  [ExternalName("ttl")] public long Ttl = 60;
+  [ExternalName("proxied")] public bool Proxied = false;
+}

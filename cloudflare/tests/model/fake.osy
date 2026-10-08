@@ -1,0 +1,126 @@
+namespace DnsCloudflareKitTests;
+
+using Osysharp.Dns;
+using Osysharp.Dns.Cloudflare;
+using Osysharp.Http;
+
+/// Whoever runs the tests.
+[Principal] entity Tester {
+  [Unique, MaxLength(200)] string Email;
+  security { allow read when IsAuthenticated; }
+}
+
+// The contract's local provider is not what this project tests — nothing here writes its table.
+[SuppressWarning("IMPORTED_ENTITY_HAS_NO_POLICY")] partial entity LocalDnsRecord { }
+
+/// One record the FAKE Cloudflare holds.
+entity FakeCfRecord {
+  [Required, MaxLength(40)] string RecordId;
+  [Required, MaxLength(40)] string ZoneId;
+  [Required, MaxLength(10)] string Type;
+  [Required, MaxLength(253)] string Name;
+  [Required, MaxLength(2000)] string Content;
+  long Ttl = 300;
+  bool Proxied = false;
+  security { allow read, create, update, delete when IsAuthenticated; }
+}
+
+/// One call the provider made, as the fake saw it.
+entity FakeCfCall {
+  [Required, MaxLength(10)] string Method;
+  [Required, MaxLength(2000)] string Url;
+  [MaxLength(4000)] string Body = "";
+  [MaxLength(200)] string Authorization = "";
+  security { allow read, create when IsAuthenticated; }
+}
+
+/// The provider under test, with a token.
+CloudflareDns Cloudflare() { return new CloudflareDns { ApiToken = "cf-test-token" }; }
+
+/// The two zones the fake hosts: `osyrin.test` and, inside it, `eu.osyrin.test`.
+string FakeZones() {
+  return "{\"success\":true,\"errors\":[],\"result\":[{\"id\":\"zone-root\",\"name\":\"osyrin.test\"},{\"id\":\"zone-eu\",\"name\":\"eu.osyrin.test\"}],\"result_info\":{\"page\":1,\"total_pages\":1}}";
+}
+
+/// A record already standing at the fake before a test begins.
+void Standing(string zoneId, string type, string name, string content) {
+  new FakeCfRecord { RecordId = "rec-" + Security.RandomHex(6), ZoneId = zoneId, Type = type, Name = name, Content = content, Ttl = 300 };
+}
+
+string Json(FakeCfRecord r) {
+  return "{\"id\":\"" + r.RecordId + "\",\"type\":\"" + r.Type + "\",\"name\":\"" + r.Name + "\",\"content\":"
+    + JsonSerializer.Serialize(r.Content) + ",\"ttl\":" + Convert.ToString(r.Ttl) + ",\"proxied\":" + (r.Proxied ? "true" : "false") + "}";
+}
+
+/// The zone id in a `/zones/{id}/…` url.
+string ZoneIdIn(string url) {
+  var at = url.IndexOf("/zones/") + 7;
+  var rest = url.Substring(at);
+  var slash = rest.IndexOf("/");
+  return slash < 0 ? rest : rest.Substring(0, slash);
+}
+
+/// The record id at the end of a `/dns_records/{id}` url.
+string RecordIdIn(string url) {
+  return url.Substring(url.IndexOf("/dns_records/") + 13);
+}
+
+/// The value of one query parameter, unescaped — or "".
+string QueryValue(string url, string key) {
+  var q = url.IndexOf("?");
+  if (q < 0) { return ""; }
+  foreach (var pair in url.Substring(q + 1).Split('&')) {
+    if (pair.StartsWith(key + "=")) { return Uri.UnescapeDataString(pair.Substring(key.Length + 1)); }
+  }
+  return "";
+}
+
+/// The auth header a call carried, or "".
+string AuthOf(Dictionary<string, string> headers) {
+  return headers.ContainsKey("Authorization") ? headers["Authorization"] : "";
+}
+
+/// GET — the zones, or one zone's records (all of them, or those at one `name`).
+HttpResponse FakeGet(string url, Dictionary<string, string> headers) {
+  new FakeCfCall { Method = "GET", Url = url, Authorization = AuthOf(headers) };
+  if (url.IndexOf("/dns_records") < 0) { return new HttpResponse { StatusCode = 200, Body = FakeZones() }; }
+  var zoneId = ZoneIdIn(url);
+  var name = QueryValue(url, "name");
+  List<string> rows = [];
+  foreach (var r in FakeCfRecord.Where(r => r.ZoneId == zoneId).OrderBy(r => r.Name).ToList()) {
+    if (name != "" && r.Name != name) { continue; }
+    rows.Add(Json(r));
+  }
+  return new HttpResponse { StatusCode = 200,
+    Body = "{\"success\":true,\"errors\":[],\"result\":[" + string.Join(",", rows) + "],\"result_info\":{\"page\":1,\"total_pages\":1}}" };
+}
+
+/// POST — one more record.
+HttpResponse FakePost(string url, string body, Dictionary<string, string> headers) {
+  new FakeCfCall { Method = "POST", Url = url, Body = body, Authorization = AuthOf(headers) };
+  var w = JsonSerializer.Deserialize<CloudflareRecordWrite>(body);
+  new FakeCfRecord { RecordId = "rec-" + Security.RandomHex(6), ZoneId = ZoneIdIn(url), Type = w.Type, Name = w.Name,
+    Content = w.Content, Ttl = w.Ttl, Proxied = w.Proxied };
+  return new HttpResponse { StatusCode = 200, Body = "{\"success\":true,\"errors\":[]}" };
+}
+
+/// PUT — one record rewritten in place.
+HttpResponse FakePut(string url, string body, Dictionary<string, string> headers) {
+  new FakeCfCall { Method = "PUT", Url = url, Body = body, Authorization = AuthOf(headers) };
+  var w = JsonSerializer.Deserialize<CloudflareRecordWrite>(body);
+  var id = RecordIdIn(url);
+  var row = FakeCfRecord.Single(r => r.RecordId == id);
+  row.Type = w.Type;
+  row.Content = w.Content;
+  row.Ttl = w.Ttl;
+  row.Proxied = w.Proxied;
+  return new HttpResponse { StatusCode = 200, Body = "{\"success\":true,\"errors\":[]}" };
+}
+
+/// DELETE — one record gone.
+HttpResponse FakeDelete(string url, Dictionary<string, string> headers) {
+  new FakeCfCall { Method = "DELETE", Url = url, Authorization = AuthOf(headers) };
+  var id = RecordIdIn(url);
+  foreach (var r in FakeCfRecord.Where(r => r.RecordId == id).ToList()) { r.Delete(); }
+  return new HttpResponse { StatusCode = 200, Body = "{\"success\":true,\"errors\":[]}" };
+}
