@@ -1,0 +1,147 @@
+namespace Osysharp.Dns;
+
+// ── the record ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The kinds of record this contract writes. APPEND-ONLY: `LocalDnsRecord` stores it by position.
+///
+/// ⚑ FOUR, ON PURPOSE. An address (A, AAAA), an alias (CNAME) and a text value (TXT) are what a platform needs to point a
+/// name somewhere and to prove it controls one. MX, SRV and CAA are real records an operator manages by hand at their
+/// provider, and a contract that offered them would be promising a mail or policy story nothing here tells.
+public enum DnsRecordKind {
+  /// An IPv4 address.
+  A,
+  /// An IPv6 address.
+  AAAA,
+  /// An alias: the name answers whatever the target answers.
+  CNAME,
+  /// A text value — an ownership proof, an ACME challenge.
+  TXT
+}
+
+/// One record, as a provider lists it.
+public class DnsRecord {
+  /// The fully-qualified name, lower-case, without the trailing dot: `billing--prod.example.com`.
+  public string Name = "";
+  public DnsRecordKind Kind = DnsRecordKind.A;
+  /// An address, the alias's target host (no trailing dot), or the TXT value (unquoted).
+  public string Value = "";
+  /// Seconds a resolver may keep the answer.
+  public int Ttl = 300;
+  /// The provider's own id for the record, when it has one — what its console and its support name it by.
+  public string ProviderId = "";
+}
+
+// ── the provider ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Something that hosts DNS zones. Implement it for a provider and name an instance in `app.Dns`:
+/// `app.Dns = new DnsSetup { Provider = new CloudflareDns { ApiToken = … } };`
+///
+/// ⚠ PLAIN DATA ONLY — strings, numbers and lists of `DnsRecord` — so an implementation over `Http.*` in Osy# and one a
+/// host supplies natively are the same shape to whatever calls it.
+///
+/// ⚠ EVERY NAME IS FULLY QUALIFIED. A provider finds the zone a name belongs to itself (Cloudflare by the longest zone
+/// name that ends it); the caller never has to know where one zone ends and another begins.
+public interface IDnsProvider {
+  /// Short and stable — "cloudflare", "local". Recorded beside every record written through it.
+  string Key { get; }
+  /// Whether it can write right now — its credentials are set. A provider that is not ready writes nothing, and the
+  /// caller HOLDS what it meant to write rather than losing it.
+  bool IsReady();
+  /// Why it is not ready, in a sentence the person who reads it can act on. A default: a provider that knows WHICH
+  /// credential is missing should say so.
+  string NotReadyReason() => $"The DNS provider '{Key}' is not ready — its credentials are not set.";
+  /// Every record of the four kinds at `domain` and every name under it.
+  List<DnsRecord> ListRecords(string domain);
+  /// Make `name` carry exactly ONE address record — `kind` is A, AAAA or CNAME — replacing every A, AAAA and CNAME already
+  /// there (a CNAME cannot share its name with anything, so "add one more" is not a thing an address can mean). Writing
+  /// what is already there changes nothing. A TXT is refused: see `AddTxtValue`.
+  void SetRecord(string name, DnsRecordKind kind, string value, int ttl);
+  /// Remove every A, AAAA and CNAME at `name`. Its TXT values stay. Removing nothing is not an error.
+  void DeleteRecords(string name);
+  /// ADD one TXT value at `name`, leaving every other value there. Adding a value that is already there is not an error.
+  ///
+  /// ⛔ NEVER REPLACE. Two zones answering two ACME challenges for one name publish two values at once.
+  void AddTxtValue(string name, string value, int ttl);
+  /// Remove ONE TXT value at `name`; every other value stays. Removing a value that is not there is not an error.
+  void RemoveTxtValue(string name, string value);
+}
+
+/// How the app's DNS records are written — `app.Dns = new DnsSetup { … }`.
+[AppSetting("Dns")]
+public class DnsSetup {
+  /// What writes them. None: nothing is written, and whatever meant to write says so where it is read.
+  public IDnsProvider? Provider = null;
+}
+
+// ── names and addresses ──────────────────────────────────────────────────────────────────────────────────────────
+
+/// A name as every comparison spells it: trimmed, lower-case, no trailing dot.
+public string NormalisedDnsName(string name) {
+  return name.Trim().ToLower().TrimEnd('.');
+}
+
+/// Is `name` the domain itself, or a name under it? `a.example.com` is under `example.com`; `badexample.com` is not.
+public bool IsAtOrUnder(string name, string domain) {
+  var n = NormalisedDnsName(name);
+  var d = NormalisedDnsName(domain);
+  if (d == "") { return false; }
+  return n == d || n.EndsWith("." + d);
+}
+
+/// Is this kind one an address setter writes — A, AAAA or CNAME?
+public bool IsAddressKind(DnsRecordKind kind) {
+  return kind == DnsRecordKind.A || kind == DnsRecordKind.AAAA || kind == DnsRecordKind.CNAME;
+}
+
+/// Is `value` an IPv4 address — four numbers from 0 to 255 joined by dots?
+public bool IsIpv4Address(string value) {
+  var parts = value.Trim().Split('.');
+  if (parts.Length != 4) { return false; }
+  foreach (var part in parts) {
+    if (part.Length == 0 || part.Length > 3) { return false; }
+    for (var i = 0; i < part.Length; i++) {
+      if ("0123456789".IndexOf(part.Substring(i, 1)) < 0) { return false; }
+    }
+    if (Convert.ToInt32(part) > 255) { return false; }
+  }
+  return true;
+}
+
+/// Is `value` an IPv6 address? A host name never carries a colon and an IPv6 address always does, and only hex digits,
+/// colons and (for an embedded IPv4 tail) dots may appear.
+public bool IsIpv6Address(string value) {
+  var v = value.Trim().ToLower();
+  if (v.IndexOf(":") < 0) { return false; }
+  for (var i = 0; i < v.Length; i++) {
+    if ("0123456789abcdef:.".IndexOf(v.Substring(i, 1)) < 0) { return false; }
+  }
+  return true;
+}
+
+/// The kind of record that points a name at `target`: an IPv4 address is an A, an IPv6 address an AAAA, and a host name
+/// a CNAME. One rule, so every caller pointing a name somewhere agrees on what kind it wrote.
+public DnsRecordKind KindToPointAt(string target) {
+  if (IsIpv4Address(target)) { return DnsRecordKind.A; }
+  if (IsIpv6Address(target)) { return DnsRecordKind.AAAA; }
+  return DnsRecordKind.CNAME;
+}
+
+/// The address records (A, AAAA, CNAME) at exactly `name`, among `records`.
+public List<DnsRecord> AddressRecordsAt(List<DnsRecord> records, string name) {
+  var n = NormalisedDnsName(name);
+  List<DnsRecord> found = [];
+  foreach (var r in records) {
+    if (NormalisedDnsName(r.Name) == n && IsAddressKind(r.Kind)) { found.Add(r); }
+  }
+  return found;
+}
+
+/// The TXT values at exactly `name`, among `records`.
+public List<string> TxtValuesAt(List<DnsRecord> records, string name) {
+  var n = NormalisedDnsName(name);
+  List<string> found = [];
+  foreach (var r in records) {
+    if (NormalisedDnsName(r.Name) == n && r.Kind == DnsRecordKind.TXT) { found.Add(r.Value); }
+  }
+  return found;
+}

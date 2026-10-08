@@ -1,0 +1,7 @@
+// The producer's test project for Osysharp.Dns — the contract's helpers and the LOCAL provider, which is the provider
+// every record-writing feature is tested against, so it has to obey the contract exactly. No test reaches a real DNS host.
+app DnsKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Dns@0;
+}

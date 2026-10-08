@@ -1,0 +1,81 @@
+namespace Osysharp.Dns;
+
+/// One record the LOCAL provider holds — the app's own table standing in for a DNS host.
+///
+/// ⚑ THE APP SAYS WHO MAY WRITE IT, so it is `Extensible` and grants nothing itself: `partial entity LocalDnsRecord {
+///   security { allow read, create, update, delete when IsOperator; } }`. A provider that writes records is, by its
+///   nature, something only the code meant to write them should reach — the package cannot know who that is.
+[Authority(Extensible)]
+[Index(Name)]
+public sealed entity LocalDnsRecord {
+  /// Fully qualified, lower-case, no trailing dot.
+  [Required, MaxLength(253)] string Name;
+  [Required] DnsRecordKind Kind;
+  /// The address, the alias's target, or the TXT value.
+  [Required, MaxLength(2000)] string Value;
+  [Min(0)] int Ttl = 300;
+}
+
+/// A DNS provider that keeps its records in the app's own `LocalDnsRecord` table and publishes nothing anywhere.
+///
+/// For a TEST (what a record-writing feature wrote is a row it can assert), for a LOCAL platform (whose names resolve
+/// without any record — `*.localhost` is loopback), and for an operator who wants to read what a real provider WOULD be
+/// asked to write before connecting one. It obeys the contract exactly — one address record per name, TXT values added
+/// and removed one at a time — so a feature that is right against it is right against a real provider.
+///
+/// ⚠ IT IS ALWAYS READY, which is the honest answer for a table and the WRONG one for a production platform: a platform
+///   that fell back to this provider for want of a credential would report every record written while the internet
+///   resolved none of them. Name it deliberately; never as a default for a missing key.
+public class LocalDnsProvider : IDnsProvider {
+  public string Key { get; } = "local";
+
+  public bool IsReady() { return true; }
+
+  public List<DnsRecord> ListRecords(string domain) {
+    var d = NormalisedDnsName(domain);
+    List<DnsRecord> found = [];
+    foreach (var row in LocalDnsRecord.Where(r => r.Name == d || r.Name.EndsWith("." + d)).OrderBy(r => r.Name).ToList()) {
+      found.Add(new DnsRecord { Name = row.Name, Kind = row.Kind, Value = row.Value, Ttl = row.Ttl, ProviderId = row.Id.ToString() });
+    }
+    return found;
+  }
+
+  public void SetRecord(string name, DnsRecordKind kind, string value, int ttl) {
+    if (!IsAddressKind(kind)) {
+      throw new ValidationException($"SetRecord writes an address — A, AAAA or CNAME — and {name} was asked for a {kind}. A TXT value is added with AddTxtValue, which never replaces another.");
+    }
+    var n = NormalisedDnsName(name);
+    var v = kind == DnsRecordKind.CNAME ? NormalisedDnsName(value) : value.Trim();
+    var kept = false;
+    foreach (var row in LocalDnsRecord.Where(r => r.Name == n).ToList()) {
+      if (!IsAddressKind(row.Kind)) { continue; }
+      if (!kept && row.Kind == kind && row.Value == v) {
+        row.Ttl = ttl;
+        kept = true;
+      } else {
+        row.Delete();
+      }
+    }
+    if (!kept) { new LocalDnsRecord { Name = n, Kind = kind, Value = v, Ttl = ttl }; }
+  }
+
+  public void DeleteRecords(string name) {
+    var n = NormalisedDnsName(name);
+    foreach (var row in LocalDnsRecord.Where(r => r.Name == n).ToList()) {
+      if (IsAddressKind(row.Kind)) { row.Delete(); }
+    }
+  }
+
+  public void AddTxtValue(string name, string value, int ttl) {
+    var n = NormalisedDnsName(name);
+    if (LocalDnsRecord.Any(r => r.Name == n && r.Kind == DnsRecordKind.TXT && r.Value == value)) { return; }
+    new LocalDnsRecord { Name = n, Kind = DnsRecordKind.TXT, Value = value, Ttl = ttl };
+  }
+
+  public void RemoveTxtValue(string name, string value) {
+    var n = NormalisedDnsName(name);
+    foreach (var row in LocalDnsRecord.Where(r => r.Name == n && r.Kind == DnsRecordKind.TXT && r.Value == value).ToList()) {
+      row.Delete();
+    }
+  }
+}

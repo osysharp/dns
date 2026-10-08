@@ -1,0 +1,132 @@
+// Osysharp.Dns — the LOCAL provider obeys the contract: one address record per name, TXT values added and removed one
+// at a time and never replaced, and a listing scoped to the domain asked about. Every assertion reads the rows the
+// provider keeps, never what a call returned.
+
+using Osysharp.Dns;
+using DnsKitTests;
+
+[TestFixture]
+void Operators() {
+  new Operator { Email = "op@dns.test" };
+}
+
+principal Op => Operator.Single(o => o.Email == "op@dns.test");
+
+[Test(Operators)]
+void an_address_replaces_whatever_address_the_name_had_and_writing_it_again_changes_nothing() {
+  runas (Op) {
+    Dns().SetRecord("Billing--Prod.Example.test.", DnsRecordKind.CNAME, "gw.zone-a.example.test", 60);
+    Dns().SetRecord("billing--prod.example.test", DnsRecordKind.CNAME, "gw.zone-b.example.test", 60);
+    Dns().SetRecord("billing--prod.example.test", DnsRecordKind.CNAME, "gw.zone-b.example.test", 60);
+    var rows = LocalDnsRecord.Where(r => r.Name == "billing--prod.example.test").ToList();
+    Assert.Equal(1, rows.Count);
+    Assert.Equal(DnsRecordKind.CNAME, rows[0].Kind);
+    Assert.Equal("gw.zone-b.example.test", rows[0].Value);
+    // An address replaces an alias too: a CNAME cannot share its name with anything.
+    Dns().SetRecord("billing--prod.example.test", DnsRecordKind.A, "203.0.113.7", 60);
+    var after = LocalDnsRecord.Single(r => r.Name == "billing--prod.example.test");
+    Assert.Equal(DnsRecordKind.A, after.Kind);
+    Assert.Equal("203.0.113.7", after.Value);
+  }
+}
+
+[Test(Operators)]
+void a_txt_value_is_added_beside_the_values_already_there_and_never_replaces_one() {
+  runas (Op) {
+    Dns().AddTxtValue("_acme-challenge.example.test", "zone-a-proof", 60);
+    Dns().AddTxtValue("_acme-challenge.example.test", "zone-b-proof", 60);
+    Dns().AddTxtValue("_acme-challenge.example.test", "zone-b-proof", 60);
+    var values = TxtValuesAt(Dns().ListRecords("example.test"), "_acme-challenge.example.test");
+    Assert.Equal(2, values.Count);
+    Assert.Contains("zone-a-proof", values);
+    Assert.Contains("zone-b-proof", values);
+    // Removing one leaves the other — zone A finishing its challenge must not end zone B's.
+    Dns().RemoveTxtValue("_acme-challenge.example.test", "zone-a-proof");
+    var left = TxtValuesAt(Dns().ListRecords("example.test"), "_acme-challenge.example.test");
+    Assert.Equal(1, left.Count);
+    Assert.Equal("zone-b-proof", left[0]);
+    // Removing what is not there is not an error.
+    Dns().RemoveTxtValue("_acme-challenge.example.test", "never-published");
+  }
+}
+
+[Test(Operators)]
+void a_txt_value_cannot_be_written_with_the_address_setter() {
+  runas (Op) {
+    Assert.Throws(() => Dns().SetRecord("_acme-challenge.example.test", DnsRecordKind.TXT, "x", 60));
+    Assert.Equal(0, LocalDnsRecord.Where(r => r.Kind == DnsRecordKind.TXT).ToList().Count);
+  }
+}
+
+[Test(Operators)]
+void deleting_a_names_records_takes_its_address_and_leaves_its_text() {
+  runas (Op) {
+    Dns().SetRecord("shop--prod.example.test", DnsRecordKind.CNAME, "gw.example.test", 60);
+    Dns().AddTxtValue("shop--prod.example.test", "keep-me", 60);
+    Dns().DeleteRecords("shop--prod.example.test");
+    Dns().DeleteRecords("never-written.example.test");
+    var left = LocalDnsRecord.Where(r => r.Name == "shop--prod.example.test").ToList();
+    Assert.Equal(1, left.Count);
+    Assert.Equal(DnsRecordKind.TXT, left[0].Kind);
+  }
+}
+
+// A record written by hand — not through the provider — in the same unit of work is still one record to delete.
+[Test(Operators)]
+void a_record_written_beside_the_provider_is_deleted_by_it() {
+  runas (Op) {
+    Dns().SetRecord("kept--prod.example.test", DnsRecordKind.CNAME, "gw.example.test", 60);
+    new LocalDnsRecord { Name = "ghost--prod.example.test", Kind = DnsRecordKind.CNAME, Value = "gw.old.example.test", Ttl = 60 };
+    var listed = Dns().ListRecords("example.test");
+    Assert.Equal(2, listed.Count);
+    Dns().DeleteRecords("ghost--prod.example.test");
+    Assert.Equal(0, LocalDnsRecord.Where(r => r.Name == "ghost--prod.example.test").ToList().Count);
+  }
+}
+
+// A record edited by hand and then put right, and another deleted, in one unit of work.
+[Test(Operators)]
+void a_record_edited_by_hand_is_put_right_and_another_deleted_in_the_same_unit_of_work() {
+  runas (Op) {
+    Dns().SetRecord("kept--prod.example.test", DnsRecordKind.CNAME, "gw.example.test", 60);
+    Dns().SetRecord("kept.example.test", DnsRecordKind.CNAME, "gw.example.test", 60);
+    var before = Dns().ListRecords("example.test");
+    LocalDnsRecord.Where(r => r.Name == "kept--prod.example.test" && r.Kind != DnsRecordKind.TXT).FirstOrDefault().Value = "evil.example.test";
+    new LocalDnsRecord { Name = "ghost--prod.example.test", Kind = DnsRecordKind.CNAME, Value = "gw.old.example.test", Ttl = 60 };
+    new LocalDnsRecord { Name = "www.example.test", Kind = DnsRecordKind.CNAME, Value = "pages.example.test", Ttl = 300 };
+    var listed = Dns().ListRecords("example.test");
+    // Each inside a try, as a caller that must not stop for one record writes them.
+    try { Dns().SetRecord("kept--prod.example.test", DnsRecordKind.CNAME, "gw.example.test", 60); }
+    catch (Exception e) { Assert.Fail("putting the record right threw: " + e.Message); }
+    try { Dns().DeleteRecords("ghost--prod.example.test"); }
+    catch (Exception e) { Assert.Fail("deleting the other record threw: " + e.Message); }
+    Assert.Equal(0, LocalDnsRecord.Where(r => r.Name == "ghost--prod.example.test").ToList().Count);
+    Assert.Equal("gw.example.test", LocalDnsRecord.Single(r => r.Name == "kept--prod.example.test").Value);
+  }
+}
+
+[Test(Operators)]
+void a_listing_holds_the_domain_and_the_names_under_it_and_nothing_that_merely_ends_alike() {
+  runas (Op) {
+    Dns().SetRecord("example.test", DnsRecordKind.A, "203.0.113.1", 60);
+    Dns().SetRecord("a--b.example.test", DnsRecordKind.CNAME, "gw.example.test", 60);
+    Dns().SetRecord("badexample.test", DnsRecordKind.A, "203.0.113.9", 60);
+    var names = new List<string>();
+    foreach (var r in Dns().ListRecords("Example.Test.")) { names.Add(r.Name); }
+    Assert.Contains("example.test", names);
+    Assert.Contains("a--b.example.test", names);
+    Assert.DoesNotContain("badexample.test", names);
+  }
+}
+
+[Test]
+void a_target_is_pointed_at_with_the_kind_its_spelling_says() {
+  Assert.Equal(DnsRecordKind.A, KindToPointAt("203.0.113.7"));
+  Assert.Equal(DnsRecordKind.AAAA, KindToPointAt("2001:db8::7"));
+  Assert.Equal(DnsRecordKind.CNAME, KindToPointAt("gw.zone-a.example.test"));
+  Assert.Equal(DnsRecordKind.CNAME, KindToPointAt("300.1.1.1.example"));
+  Assert.True(IsAtOrUnder("x--y.example.test", "example.test"));
+  Assert.True(IsAtOrUnder("example.test.", "EXAMPLE.test"));
+  Assert.False(IsAtOrUnder("badexample.test", "example.test"));
+  Assert.False(IsAtOrUnder("example.test", ""));
+}

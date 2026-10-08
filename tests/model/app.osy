@@ -1,0 +1,19 @@
+namespace DnsKitTests;
+
+using Osysharp.Dns;
+
+/// Whoever runs the tests — an operator of the records.
+[Principal] entity Operator {
+  [Unique, MaxLength(200)] string Email;
+  security { allow read when IsAuthenticated; }
+}
+
+// The app says who may write its records: here, anybody signed in. A real app names its operators.
+partial entity LocalDnsRecord { security { allow read, create, update, delete when IsAuthenticated; } }
+
+// The app names the provider that writes its records — here the kit's own, which keeps them in the app's table. A real
+// app names a DNS host's (`new CloudflareDns { ApiToken = … }`, Osysharp.Dns.Cloudflare); nothing else changes.
+app.Dns = new DnsSetup { Provider = new LocalDnsProvider() };
+
+/// The provider the app writes through — the one `app.Dns` names, read the way any feature of the app reads it.
+IDnsProvider Dns() { return App.Setting<DnsSetup>().Provider!; }
