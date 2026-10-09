@@ -59,5 +59,5 @@ report every record as written while the internet resolved none of them.
 ## Providers
 
 - **[Osysharp.Dns.Cloudflare](https://osyrin.com/templates/kits/dns-cloudflare/)**: Cloudflare's v4 API.
-- **Not built yet**: Route 53, Google Cloud DNS, Azure DNS, and a self-hosted server. Each is one more kit with the same
+- **Your own**: Route 53, Google Cloud DNS, Azure DNS or a self-hosted server is one more provider package with the same
   five verbs.

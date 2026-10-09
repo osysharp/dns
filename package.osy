@@ -8,8 +8,8 @@
 //   first — so the code that writes records changes provider by changing one setting, and nothing that writes changes
 //   with it. Google Cloud DNS, Azure DNS and a self-hosted server are further adapters behind the same five verbs.
 //
-// ⚑ WHY THIS IS A PACKAGE AND NOT THE PLATFORM (D-CORESTABLE1). Its first caller is the control plane (ledger
-//   D-ZONEDNS1: one record per placement, and every zone's ACME DNS-01 challenge), and the control plane is an Osy#
+// ⚑ WHY THIS IS A PACKAGE AND NOT THE PLATFORM. Its first caller is the control plane (one record per placement, and
+//   every zone's ACME DNS-01 challenge), and the control plane is an Osy#
 //   app that already composes kits for exactly this kind of seam — its mail goes out through `Osysharp.Mail`. Nothing
 //   here is called by platform C#: the zone agents never hold a DNS credential, they ask the control plane to publish
 //   their challenge, so a kit can carry the contract and the platform needs no new surface.
@@ -19,7 +19,7 @@
 //   second zone's challenge erase the first's — each zone's renewal then fails at random, depending on who asked
 //   last. The contract has no TXT setter at all: `AddTxtValue` and `RemoveTxtValue`, one value each.
 package Osysharp.Dns {
-  version     "0.1.0";
+  version "0.1.1";
   minPlatform "0.9.0";
   summary     "DNS records an app writes — one record shape, a pluggable provider, add-a-value TXT semantics, and a provider that keeps records in the app's own table.";
   model "model/*.osy";
