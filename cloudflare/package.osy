@@ -9,11 +9,11 @@
 //   learns which.
 //
 // ⛔ RECORDS ARE WRITTEN "DNS ONLY", NEVER PROXIED — with ONE exception, a CNAME to a Cloudflare Tunnel, which Cloudflare routes only
-//   through its edge (ledger D-INGRESSBRIDGE1; `CloudflareDns.Proxied`). A proxied record terminates TLS at Cloudflare and forwards from
-//   there — a global front door in front of every zone, which is the option D-ZONEDNS1 decided against (every request
+//   through its edge (`CloudflareDns.Proxied`). A proxied record terminates TLS at Cloudflare and forwards from
+//   there — a global front door in front of every zone, which this package deliberately is not (every request
 //   would cross clouds through it). A name this provider points at a zone's gateway resolves to that gateway.
 package Osysharp.Dns.Cloudflare {
-  version     "0.2.0";
+  version "0.2.1";
   minPlatform "0.9.0";
   summary     "Cloudflare DNS as an Osysharp.Dns provider — records by the v4 API, TXT values added and removed one at a time, never proxied.";
   model "model/*.osy";

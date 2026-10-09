@@ -187,7 +187,7 @@ public class CloudflareDns : IDnsProvider {
   }
 
   /// ⛔ THE ONE PROXIED RECORD: a CNAME to a Cloudflare Tunnel (`<id>.cfargotunnel.com`). Cloudflare routes a name to a tunnel only
-  ///    through its edge, so a DNS-only CNAME there resolves to nothing anybody can reach (ledger D-INGRESSBRIDGE1). Every other
+  ///    through its edge, so a DNS-only CNAME there resolves to nothing anybody can reach. Every other
   ///    record stays DNS only, which is the package's rule.
   bool Proxied(DnsRecordKind kind, string value) {
     return kind == DnsRecordKind.CNAME && NormalisedDnsName(value).EndsWith(".cfargotunnel.com");

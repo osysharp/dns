@@ -6,8 +6,8 @@
     {
       "name": "Osysharp.Dns",
       "kind": "package",
-      "version": "0.1.0",
-      "hash": "sha256:806a36f455ee6742094c3233e7103dacce58171ea950ea4e430b8166fe909c37",
+      "version": "0.1.1",
+      "hash": "sha256:5e6c1b354bed9ccfdba582422a579006f4ed4de05cae227dc75dc9024cc65683",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/dns",
