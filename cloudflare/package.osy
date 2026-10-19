@@ -13,8 +13,8 @@
 //   there — a global front door in front of every zone, which this package deliberately is not (every request
 //   would cross clouds through it). A name this provider points at a zone's gateway resolves to that gateway.
 package Osysharp.Dns.Cloudflare {
-  version "0.2.1";
-  minPlatform "0.9.0";
+  version "0.3.0";
+  minPlatform "0.14.0";
   summary     "Cloudflare DNS as an Osysharp.Dns provider — records by the v4 API, TXT values added and removed one at a time, never proxied.";
   model "model/*.osy";
   use Osysharp.Dns@0;
