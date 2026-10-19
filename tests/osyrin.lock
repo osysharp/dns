@@ -2,18 +2,7 @@
   "platform": {
     "version": "0.9.0"
   },
-  "entries": [
-    {
-      "name": "Osysharp.Dns",
-      "kind": "package",
-      "version": "0.1.1",
-      "hash": "sha256:5e6c1b354bed9ccfdba582422a579006f4ed4de05cae227dc75dc9024cc65683",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:kits/dns",
-      "constraint": "0"
-    }
-  ],
+  "entries": [],
   "bridges": {
     "searched": [
       "workspace",

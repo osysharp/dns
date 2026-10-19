@@ -19,8 +19,8 @@
 //   second zone's challenge erase the first's — each zone's renewal then fails at random, depending on who asked
 //   last. The contract has no TXT setter at all: `AddTxtValue` and `RemoveTxtValue`, one value each.
 package Osysharp.Dns {
-  version "0.1.1";
-  minPlatform "0.9.0";
+  version "0.2.0";
+  minPlatform "0.14.0";
   summary     "DNS records an app writes — one record shape, a pluggable provider, add-a-value TXT semantics, and a provider that keeps records in the app's own table.";
   model "model/*.osy";
   tests "tests";
