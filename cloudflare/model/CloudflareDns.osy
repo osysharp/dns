@@ -50,7 +50,32 @@ public class CloudflareDns : IDnsProvider {
     return found;
   }
 
-  public void SetRecord(string name, DnsRecordKind kind, string value, int ttl) {
+  public void SetRecord(string name, DnsRecordKind kind, string value, int ttl) { Set(name, kind, value, ttl, null); }
+
+  /// The mark is the record's COMMENT — the one field Cloudflare keeps on every plan (tags need a paid one) — so a listing
+  /// of the zone names it, and the console shows it beside the record to whoever opens it.
+  public void SetOwnedRecord(string name, DnsRecordKind kind, string value, int ttl, string owner) {
+    if (owner.Length > 100) {
+      throw new ValidationException($"A Cloudflare record's comment holds at most 100 characters, and the ownership mark for {name} is {owner.Length}.");
+    }
+    Set(name, kind, value, ttl, owner);
+  }
+
+  /// ⛔ WHAT CLOUDFLARE HOLDS, NOT WHAT WAS SENT. A proxied record's TTL is Cloudflare's own ("automatic", listed as 1) whatever a
+  ///    write asked for, so a proxied record is as written whatever its TTL; a DNS-only one is compared at the TTL a write would
+  ///    send (60 at the least). And the proxied flag is part of the answer: a record with the right target and the wrong flag is
+  ///    a name that resolves somewhere else — DNS-only onto a tunnel resolves to nothing at all.
+  public bool IsAsWritten(DnsRecord record, DnsRecordKind kind, string value, int ttl) {
+    if (record.Kind != kind) { return false; }
+    var v = kind == DnsRecordKind.CNAME ? NormalisedDnsName(value) : value.Trim();
+    if (record.Value.ToLower().TrimEnd('.') != v.ToLower()) { return false; }
+    var proxied = Proxied(kind, v);
+    if (record.Proxied != proxied) { return false; }
+    return proxied || record.Ttl == TtlOf(ttl);
+  }
+
+  /// `owner` null: the comment is not compared, and a write sends none.
+  void Set(string name, DnsRecordKind kind, string value, int ttl, string? owner) {
     if (!IsAddressKind(kind)) {
       throw new ValidationException($"SetRecord writes an address — A, AAAA or CNAME — and {name} was asked for a TXT. A TXT value is added with AddTxtValue, which never replaces another.");
     }
@@ -66,15 +91,16 @@ public class CloudflareDns : IDnsProvider {
       if (k == null || !IsAddressKind(k.Value)) { continue; }
       if (keep == "" && k.Value == kind) {
         keep = r.RecordId;
-        if (Unquoted(r.Content).ToLower().TrimEnd('.') != v.ToLower() || r.Ttl != ttl || r.Proxied != Proxied(kind, v)) {
-          Write("PUT", "/zones/" + zone.ZoneId + "/dns_records/" + r.RecordId, Body(kind, n, v, ttl));
+        var markDiffers = owner != null && (r.Comment ?? "") != owner;
+        if (!IsAsWritten(Record(r), kind, v, ttl) || markDiffers) {
+          Write("PUT", "/zones/" + zone.ZoneId + "/dns_records/" + r.RecordId, Body(kind, n, v, ttl, owner));
         }
       } else {
         Write("DELETE", "/zones/" + zone.ZoneId + "/dns_records/" + r.RecordId, "");
       }
     }
     if (keep == "") {
-      Write("POST", "/zones/" + zone.ZoneId + "/dns_records", Body(kind, n, v, ttl));
+      Write("POST", "/zones/" + zone.ZoneId + "/dns_records", Body(kind, n, v, ttl, owner));
     }
   }
 
@@ -96,7 +122,7 @@ public class CloudflareDns : IDnsProvider {
     foreach (var r in RecordsNamed(zone, n)) {
       if (r.Type == "TXT" && Unquoted(r.Content) == value) { return; }
     }
-    Write("POST", "/zones/" + zone.ZoneId + "/dns_records", Body(DnsRecordKind.TXT, n, value, ttl));
+    Write("POST", "/zones/" + zone.ZoneId + "/dns_records", Body(DnsRecordKind.TXT, n, value, ttl, null));
   }
 
   /// Deletes exactly the record holding `value` — every other TXT at the name stays, whoever published it.
@@ -151,7 +177,8 @@ public class CloudflareDns : IDnsProvider {
   DnsRecord Record(CloudflareRecord r) {
     var kind = KindOf(r.Type) ?? DnsRecordKind.TXT;
     var value = r.Type == "TXT" ? Unquoted(r.Content) : r.Content.Trim().TrimEnd('.');
-    return new DnsRecord { Name = NormalisedDnsName(r.Name), Kind = kind, Value = value, Ttl = (int)r.Ttl, ProviderId = r.RecordId };
+    return new DnsRecord { Name = NormalisedDnsName(r.Name), Kind = kind, Value = value, Ttl = (int)r.Ttl, ProviderId = r.RecordId,
+      Proxied = r.Proxied, Owner = r.Comment ?? "" };
   }
 
   /// The contract's kind for one of Cloudflare's record types, or null for a type the contract does not carry (MX, SRV,
@@ -179,12 +206,17 @@ public class CloudflareDns : IDnsProvider {
     return c;
   }
 
-  string Body(DnsRecordKind kind, string name, string value, int ttl) {
-    // Cloudflare's floor is 60 seconds (1 means "automatic", which is 300): a shorter TTL is raised to it rather than
-    // refused, because what a caller wants from a short TTL is "change fast", and 60 is as fast as this host goes.
-    var t = ttl < 60 ? 60 : ttl;
-    return JsonSerializer.Serialize(new CloudflareRecordWrite { Type = TypeOf(kind), Name = name, Content = value, Ttl = t, Proxied = Proxied(kind, value) });
+  string Body(DnsRecordKind kind, string name, string value, int ttl, string? owner) {
+    var proxied = Proxied(kind, value);
+    // A proxied record's TTL is Cloudflare's ("automatic", 1): sending one is meaningless, and comparing one made every
+    // proxied record look changed on every write.
+    return JsonSerializer.Serialize(new CloudflareRecordWrite { Type = TypeOf(kind), Name = name, Content = value,
+      Ttl = proxied ? 1 : TtlOf(ttl), Proxied = proxied, Comment = owner == null || owner == "" ? null : owner });
   }
+
+  /// Cloudflare's floor is 60 seconds (1 means "automatic", which is 300): a shorter TTL is raised to it rather than refused,
+  /// because what a caller wants from a short TTL is "change fast", and 60 is as fast as this host goes.
+  int TtlOf(int ttl) { return ttl < 60 ? 60 : ttl; }
 
   /// ⛔ THE ONE PROXIED RECORD: a CNAME to a Cloudflare Tunnel (`<id>.cfargotunnel.com`). Cloudflare routes a name to a tunnel only
   ///    through its edge, so a DNS-only CNAME there resolves to nothing anybody can reach. Every other

@@ -107,6 +107,56 @@ void a_cname_to_a_tunnel_is_proxied_and_every_other_record_stays_dns_only() {
   }
 }
 
+// ⛔ THE PROXIED FLAG IS PART OF WHAT WAS WRITTEN. A record with the right target and the wrong flag resolves somewhere else —
+//    DNS-only onto a tunnel resolves to nothing (11 Nov 2026: three applications down for 11 minutes) — so it is not "as written",
+//    and writing it again puts the flag right in place; a proxied record's TTL is Cloudflare's own, and never a reason to rewrite.
+[Test(Testers)]
+void a_record_with_the_right_target_and_the_wrong_proxied_flag_is_not_as_written_and_a_write_puts_it_right() {
+  runas (T) {
+    var tunnel = "6ff42ae2-765d-4adf-8112-31c55c1551ef.cfargotunnel.com";
+    Standing("zone-root", "CNAME", "app.osyrin.test", tunnel);
+    Standing("zone-root", "CNAME", "plain.osyrin.test", "gw.zone-a.example.net");
+    FakeCfRecord.Single(r => r.Name == "plain.osyrin.test").Proxied = true;
+    FakeCfRecord.Single(r => r.Name == "plain.osyrin.test").Ttl = 1;
+    var listed = Cloudflare().ListRecords("osyrin.test");
+    var app = AddressRecordsAt(listed, "app.osyrin.test")[0];
+    var plain = AddressRecordsAt(listed, "plain.osyrin.test")[0];
+    Assert.False(app.Proxied);
+    Assert.True(plain.Proxied);
+    Assert.False(Cloudflare().IsAsWritten(app, DnsRecordKind.CNAME, tunnel, 60));
+    Assert.False(Cloudflare().IsAsWritten(plain, DnsRecordKind.CNAME, "gw.zone-a.example.net", 60));
+
+    Cloudflare().SetRecord("app.osyrin.test", DnsRecordKind.CNAME, tunnel, 60);
+    Cloudflare().SetRecord("plain.osyrin.test", DnsRecordKind.CNAME, "gw.zone-a.example.net", 60);
+    Assert.True(FakeCfRecord.Single(r => r.Name == "app.osyrin.test").Proxied);
+    Assert.False(FakeCfRecord.Single(r => r.Name == "plain.osyrin.test").Proxied);
+    Assert.Equal(2, FakeCfCall.Where(c => c.Method == "PUT").ToList().Count);
+    var again = Cloudflare().ListRecords("osyrin.test");
+    Assert.True(Cloudflare().IsAsWritten(AddressRecordsAt(again, "app.osyrin.test")[0], DnsRecordKind.CNAME, tunnel, 60));
+    Assert.True(Cloudflare().IsAsWritten(AddressRecordsAt(again, "plain.osyrin.test")[0], DnsRecordKind.CNAME, "gw.zone-a.example.net", 60));
+  }
+}
+
+// An owned record carries its mark as its comment, and a listing names it; writing it again with the same mark changes nothing,
+// and a mark somebody edited away is put back.
+[Test(Testers)]
+void an_owned_record_carries_its_mark_in_its_comment_and_the_listing_names_it() {
+  runas (T) {
+    Cloudflare().SetOwnedRecord("billing.osyrin.test", DnsRecordKind.CNAME, "gw.zone-a.example.net", 60, "Osyrin Admin abc123");
+    Assert.Equal("Osyrin Admin abc123", FakeCfRecord.Single(r => r.Name == "billing.osyrin.test").Comment);
+    Assert.Equal("Osyrin Admin abc123", AddressRecordsAt(Cloudflare().ListRecords("osyrin.test"), "billing.osyrin.test")[0].Owner);
+    var writes = FakeCfCall.Where(c => c.Method != "GET").ToList().Count;
+    Cloudflare().SetOwnedRecord("billing.osyrin.test", DnsRecordKind.CNAME, "gw.zone-a.example.net", 60, "Osyrin Admin abc123");
+    Assert.Equal(writes, FakeCfCall.Where(c => c.Method != "GET").ToList().Count);
+    FakeCfRecord.Single(r => r.Name == "billing.osyrin.test").Comment = null;
+    Cloudflare().SetOwnedRecord("billing.osyrin.test", DnsRecordKind.CNAME, "gw.zone-a.example.net", 60, "Osyrin Admin abc123");
+    Assert.Equal("Osyrin Admin abc123", FakeCfRecord.Single(r => r.Name == "billing.osyrin.test").Comment);
+    // A record nobody marked lists no owner.
+    Standing("zone-root", "CNAME", "other.osyrin.test", "gw.zone-a.example.net");
+    Assert.Equal("", AddressRecordsAt(Cloudflare().ListRecords("osyrin.test"), "other.osyrin.test")[0].Owner);
+  }
+}
+
 [Test(Testers)]
 void deleting_a_names_records_takes_its_address_and_leaves_its_text() {
   runas (T) {

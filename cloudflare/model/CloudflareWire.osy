@@ -36,6 +36,8 @@ public class CloudflareRecord {
   [ExternalName("content")] public string Content = "";
   [ExternalName("ttl")] public long Ttl = 1;
   [ExternalName("proxied")] public bool Proxied = false;
+  /// The record's comment — where `SetOwnedRecord` writes its ownership mark. Cloudflare keeps up to 100 characters on every plan.
+  [ExternalName("comment")] public string? Comment;
 }
 
 /// What `GET /zones/{id}/dns_records` answers.
@@ -52,11 +54,13 @@ public class CloudflareWriteAnswer {
   [ExternalName("errors")] public List<CloudflareError> Errors = [];
 }
 
-/// What a write sends — one record. `proxied` is always false: see the package's note.
+/// What a write sends — one record. `proxied` is true only for a CNAME to a tunnel: see the package's note.
 public class CloudflareRecordWrite {
   [ExternalName("type")] public string Type = "";
   [ExternalName("name")] public string Name = "";
   [ExternalName("content")] public string Content = "";
   [ExternalName("ttl")] public long Ttl = 60;
   [ExternalName("proxied")] public bool Proxied = false;
+  /// The ownership mark, or null to write none.
+  [ExternalName("comment")] public string? Comment;
 }

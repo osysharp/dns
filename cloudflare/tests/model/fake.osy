@@ -22,6 +22,7 @@ entity FakeCfRecord {
   [Required, MaxLength(2000)] string Content;
   long Ttl = 300;
   bool Proxied = false;
+  [MaxLength(200)] string? Comment;
   security { allow read, create, update, delete when IsAuthenticated; }
 }
 
@@ -49,7 +50,8 @@ void Standing(string zoneId, string type, string name, string content) {
 
 string Json(FakeCfRecord r) {
   return "{\"id\":\"" + r.RecordId + "\",\"type\":\"" + r.Type + "\",\"name\":\"" + r.Name + "\",\"content\":"
-    + JsonSerializer.Serialize(r.Content) + ",\"ttl\":" + Convert.ToString(r.Ttl) + ",\"proxied\":" + (r.Proxied ? "true" : "false") + "}";
+    + JsonSerializer.Serialize(r.Content) + ",\"ttl\":" + Convert.ToString(r.Ttl) + ",\"proxied\":" + (r.Proxied ? "true" : "false")
+    + ",\"comment\":" + (r.Comment == null ? "null" : JsonSerializer.Serialize(r.Comment)) + "}";
 }
 
 /// The zone id in a `/zones/{id}/…` url.
@@ -100,9 +102,12 @@ HttpResponse FakePost(string url, string body, Dictionary<string, string> header
   new FakeCfCall { Method = "POST", Url = url, Body = body, Authorization = AuthOf(headers) };
   var w = JsonSerializer.Deserialize<CloudflareRecordWrite>(body);
   new FakeCfRecord { RecordId = "rec-" + Security.RandomHex(6), ZoneId = ZoneIdIn(url), Type = w.Type, Name = w.Name,
-    Content = w.Content, Ttl = w.Ttl, Proxied = w.Proxied };
+    Content = w.Content, Ttl = TtlHeld(w), Proxied = w.Proxied, Comment = w.Comment };
   return new HttpResponse { StatusCode = 200, Body = "{\"success\":true,\"errors\":[]}" };
 }
+
+/// The TTL Cloudflare HOLDS after a write: a proxied record's is always its own "automatic", listed as 1, whatever was sent.
+long TtlHeld(CloudflareRecordWrite w) { return w.Proxied ? 1 : w.Ttl; }
 
 /// PUT — one record rewritten in place.
 HttpResponse FakePut(string url, string body, Dictionary<string, string> headers) {
@@ -112,8 +117,9 @@ HttpResponse FakePut(string url, string body, Dictionary<string, string> headers
   var row = FakeCfRecord.Single(r => r.RecordId == id);
   row.Type = w.Type;
   row.Content = w.Content;
-  row.Ttl = w.Ttl;
+  row.Ttl = TtlHeld(w);
   row.Proxied = w.Proxied;
+  row.Comment = w.Comment;
   return new HttpResponse { StatusCode = 200, Body = "{\"success\":true,\"errors\":[]}" };
 }
 
