@@ -14,6 +14,8 @@ public sealed entity LocalDnsRecord {
   /// The address, the alias's target, or the TXT value.
   [Required, MaxLength(2000)] string Value;
   [Min(0)] int Ttl = 300;
+  /// The ownership mark `SetOwnedRecord` wrote beside it, or empty.
+  [MaxLength(200)] string? Owner;
 }
 
 /// A DNS provider that keeps its records in the app's own `LocalDnsRecord` table and publishes nothing anywhere.
@@ -35,12 +37,17 @@ public class LocalDnsProvider : IDnsProvider {
     var d = NormalisedDnsName(domain);
     List<DnsRecord> found = [];
     foreach (var row in LocalDnsRecord.Where(r => r.Name == d || r.Name.EndsWith("." + d)).OrderBy(r => r.Name).ToList()) {
-      found.Add(new DnsRecord { Name = row.Name, Kind = row.Kind, Value = row.Value, Ttl = row.Ttl, ProviderId = row.Id.ToString() });
+      found.Add(new DnsRecord { Name = row.Name, Kind = row.Kind, Value = row.Value, Ttl = row.Ttl, ProviderId = row.Id.ToString(), Owner = row.Owner ?? "" });
     }
     return found;
   }
 
-  public void SetRecord(string name, DnsRecordKind kind, string value, int ttl) {
+  public void SetRecord(string name, DnsRecordKind kind, string value, int ttl) { Set(name, kind, value, ttl, null); }
+
+  public void SetOwnedRecord(string name, DnsRecordKind kind, string value, int ttl, string owner) { Set(name, kind, value, ttl, owner); }
+
+  /// `owner` null: the mark is left as it is (a plain `SetRecord`).
+  void Set(string name, DnsRecordKind kind, string value, int ttl, string? owner) {
     if (!IsAddressKind(kind)) {
       throw new ValidationException($"SetRecord writes an address — A, AAAA or CNAME — and {name} was asked for a {kind}. A TXT value is added with AddTxtValue, which never replaces another.");
     }
@@ -51,12 +58,13 @@ public class LocalDnsProvider : IDnsProvider {
       if (!IsAddressKind(row.Kind)) { continue; }
       if (!kept && row.Kind == kind && row.Value == v) {
         row.Ttl = ttl;
+        if (owner != null) { row.Owner = owner == "" ? null : owner; }
         kept = true;
       } else {
         row.Delete();
       }
     }
-    if (!kept) { new LocalDnsRecord { Name = n, Kind = kind, Value = v, Ttl = ttl }; }
+    if (!kept) { new LocalDnsRecord { Name = n, Kind = kind, Value = v, Ttl = ttl, Owner = owner == null || owner == "" ? null : owner }; }
   }
 
   public void DeleteRecords(string name) {
